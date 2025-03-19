@@ -10,6 +10,9 @@ import face_recognition
 from fastapi.middleware.cors import CORSMiddleware
 from scipy.spatial import distance as dist
 from pathlib import Path
+import logging
+import dlib
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -31,38 +34,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load pre-trained face recognition model
-with open("FaceRec_Trained_Model.pickle", "rb") as f:
-    data = pickle.load(f)
 
-knownEncodeList = data["encodings"]
-classNames = data["names"]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True,filename="app.log",  # Specify the file to write logs to
+    filemode="a",   )
+logging.info("Test log message")
+print("Print statement for comparison")
+
+
 
 # ======================== Utility Functions ========================
-def eye_aspect_ratio(eye):
-    """Calculate the eye aspect ratio (EAR) for liveness detection."""
-    A, B, C = dist.euclidean(eye[1], eye[5]), dist.euclidean(eye[2], eye[4]), dist.euclidean(eye[0], eye[3])
-    return (A + B) / (2.0 * C) if C != 0 else 0  # Avoid division by zero
 
-def liveness_detection(image):
-    """Detects liveness based on eye aspect ratio (EAR)."""
-    face_landmarks = face_recognition.face_landmarks(image)
 
-    if not face_landmarks:
-        return False, image
 
-    for landmarks in face_landmarks:
-        leftEAR = eye_aspect_ratio(landmarks["left_eye"])
-        rightEAR = eye_aspect_ratio(landmarks["right_eye"])
-        ear = (leftEAR + rightEAR) / 2.0
-
-        # Overlay EAR value on image for debugging
-        cv2.putText(image, f"EAR: {ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-        if ear < 0.25:  # Threshold for closed eyes
-            return True, image
-
-    return False, image
 
 def save_images_from_api(images: List[UploadFile], username: str):
     user_dir = DATASET_DIR / username
@@ -86,7 +69,52 @@ def save_images_from_api(images: List[UploadFile], username: str):
 
     return {"message": f"Saved {len(images)} images for {username}"}
 
+with open("./FaceRec_Trained_Model.pickle", "rb") as f:
+    puckledata = pickle.load(f)
+    knownEncodings = puckledata["encodings"]
+    knownNames = puckledata["names"]
+    logging.error(knownNames)
+
+
+    
+def analyze_pickle_structure(pickle_path):
+    """Analyze and print the structure of the pickle file to help debugging"""
+    try:
+        with open(pickle_path, "rb") as f:
+            data = pickle.load(f)
+        
+        print("\n=== PICKLE FILE ANALYSIS ===")
+        if isinstance(data, dict):
+            print(f"Type: Dictionary with {len(data.keys())} keys")
+            print(f"Keys: {list(data.keys())}")
+            for key, value in data.items():
+                if isinstance(value, list):
+                    print(f"  '{key}': List with {len(value)} items")
+                    if value and len(value) > 0:
+                        print(f"    First item type: {type(value[0])}")
+                        if isinstance(value[0], np.ndarray):
+                            print(f"    First item shape: {value[0].shape}")
+                else:
+                    print(f"  '{key}': {type(value)}")
+        elif isinstance(data, list):
+            print(f"Type: List with {len(data)} items")
+            if data and len(data) > 0:
+                print(f"First item type: {type(data[0])}")
+                if isinstance(data[0], np.ndarray):
+                    print(f"First item shape: {data[0].shape}")
+        else:
+            print(f"Type: {type(data)}")
+        print("===========================\n")
+        return data
+    except Exception as e:
+        print(f"Error analyzing pickle file: {e}")
+        return None
+
+
+
 def recognize_faces(image):
+    logging.info("Connected with Data")
+    
     """Detects and recognizes faces in an image."""
     img_resized = cv2.resize(image, (0, 0), fx=0.25, fy=0.25)
     img_resized = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
@@ -97,11 +125,11 @@ def recognize_faces(image):
     name = "Unknown"
 
     for encode_face, face_loc in zip(encodes_cur_frame, faces_cur_frame):
-        face_distances = face_recognition.face_distance(knownEncodeList, encode_face)
+        face_distances = face_recognition.face_distance(knownEncodings, encode_face)
         match_index = np.argmin(face_distances)
 
         if face_distances[match_index] < 0.6:
-            name = classNames[match_index].title()
+            name = knownNames[match_index].title()
 
         # Scale coordinates back to original image size
         y1, x2, y2, x1 = [val * 4 for val in face_loc]
@@ -160,13 +188,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 # Perform liveness detection
-                is_live, image_with_liveness = liveness_detection(image)
-                if not is_live:
-                    await websocket.send_json({"status": "Liveness detection failed"})
-                    continue
+                # is_live, image_with_liveness, accuracy = liveness_detection(image)
+                # if not is_live:
+                #     await websocket.send_json({"status": "Liveness detection failed"})
+                #     continue
 
                 # Perform face recognition
-                processed_image, name = recognize_faces(image_with_liveness)
+                processed_image, name = recognize_faces(image)
 
                 # Convert processed image to base64
                 _, buffer = cv2.imencode(".jpg", processed_image)

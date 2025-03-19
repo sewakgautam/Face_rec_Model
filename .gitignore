@@ -24,3 +24,4 @@ Dataset
 *.sln
 *.sw?
 
+.vercel
