@@ -11,7 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from scipy.spatial import distance as dist
 from pathlib import Path
 import logging
-import dlib
+import os
+from joblib import Parallel, delayed
+from imutils import paths
+import multiprocessing
+from tqdm import tqdm
 
 
 # Initialize FastAPI app
@@ -33,12 +37,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True,filename="app.log",  # Specify the file to write logs to
-    filemode="a",   )
-logging.info("Test log message")
-print("Print statement for comparison")
 
 
 
@@ -154,7 +152,43 @@ class WebSocketResponse(BaseModel):
 
 # ============================== Normal API ===========================
 
-@app.post("/registerfaces/", response_model=RegisterFacesResponse, summary="Register Faces", tags=["Face Recognition"])
+# Function to save images from API
+def save_images_from_api(images: List[UploadFile], username: str):
+    save_dir = os.path.join("Dataset", username)
+    os.makedirs(save_dir, exist_ok=True)
+    for i, image in enumerate(images):
+        file_path = os.path.join(save_dir, f"{username}_{i}.jpg")
+        with open(file_path, "wb") as buffer:
+            buffer.write(image.file.read())
+
+# Function to process a single image
+def process_image(imagePath):
+    try:
+        name = imagePath.split(os.path.sep)[-2]
+        image = cv2.imread(imagePath)
+        
+        # Skip if the image is corrupted or invalid
+        if image is None:
+            logging.warning(f"Skipping corrupted image: {imagePath}")
+            return [], []
+
+        # Detect faces in the image
+        boxes = face_recognition.face_locations(image, model='cnn')  # Use 'cnn' for better accuracy (requires GPU)
+        encodings = face_recognition.face_encodings(image, boxes)
+
+        # If no faces are detected, skip the image
+        if not encodings:
+            logging.warning(f"No faces detected in image: {imagePath}")
+            return [], []
+
+        # Return encodings and corresponding names
+        return encodings, [name] * len(encodings)
+    except Exception as e:
+        logging.error(f"Error processing {imagePath}: {e}")
+        return [], []
+
+# Endpoint to register faces
+@app.post("/registerfaces/", summary="Register Faces", tags=["Face Recognition"])
 async def registerfaces(username: str = Form(...), images: List[UploadFile] = File(...)):
     """
     Endpoint to register faces by receiving a list of images.
@@ -162,9 +196,41 @@ async def registerfaces(username: str = Form(...), images: List[UploadFile] = Fi
     """
     if len(images) != 10:
         raise HTTPException(status_code=400, detail="Exactly 10 images required")
+
+    # Save uploaded images
     save_images_from_api(images, username)
 
-    return {"message": f"Received 10 images for {username}"}
+    # Process images to generate face encodings
+    imagePaths = list(paths.list_images(os.path.join("Dataset", username)))
+    if not imagePaths:
+        raise HTTPException(status_code=400, detail="No images found for processing")
+
+    # Use all available CPU cores for parallel processing
+    num_cores = multiprocessing.cpu_count()
+    results = Parallel(n_jobs=num_cores)(delayed(process_image)(imagePath) for imagePath in tqdm(imagePaths, desc="Processing Images"))
+
+    # Combine results
+    knownEncodings = []
+    knownNames = []
+    for encodings, names in results:
+        knownEncodings.extend(encodings)
+        knownNames.extend(names)
+
+    # Save encodings to disk
+    if knownEncodings:
+        print("[INFO] Serializing encodings...")
+        data = {"encodings": knownEncodings, "names": knownNames}
+        with open('FaceRec_Trained_Model.pickle', "wb") as f:
+            pickle.dump(data, f)
+        print("[INFO] Encodings saved to FaceRec_Trained_Model.pickle")
+    else:
+        print("[INFO] No encodings were generated. Check the dataset and logs for errors.")
+
+    return {"message": f"Received 10 images for {username} and processed successfully"}
+
+# Helper function to list image paths
+def list_images(directory: str):
+    return [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(('.jpg', '.jpeg', '.png'))]
 # ======================== WebSocket Endpoint ========================
 
 @app.websocket("/ws")
@@ -187,12 +253,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"status": "Error: Unable to decode image"})
                     continue
 
-                # Perform liveness detection
-                # is_live, image_with_liveness, accuracy = liveness_detection(image)
-                # if not is_live:
-                #     await websocket.send_json({"status": "Liveness detection failed"})
-                #     continue
-
+             
                 # Perform face recognition
                 processed_image, name = recognize_faces(image)
 

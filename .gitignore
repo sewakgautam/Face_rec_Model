@@ -25,3 +25,4 @@ Dataset
 *.sw?
 
 .vercel
+*.dat
